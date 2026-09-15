@@ -1,0 +1,89 @@
+system level func들은 
+에러를 만나면 -1을 return, errno를 
+새로 설정 
+
+각 process는 유일한 nonzero process
+ID (PID)가 존재. getpid는 이 pid를 
+call한 process에게 return. 
+getppid는 자기 부모의 pid.
+
+process의 상태:
+running: 돌아가고 있거나 스케줄링 될 예정
+stopped: 스케쥴링 되지 않을 예정. SIGCONT를 
+받으면 다시 running으로.
+Terminated: 영구히 stopped.
+exit(int status)는 process를 status의 exit status
+로 terminate. 
+fork()는 자식프로세스에게 0, 부모에겐 생성된 
+자식의 pid를 return.
+자식은 부모의 가상메모리 공간(하지만 
+물리 메모리 공간은 당연하지만 다르게 부여받는다)
+을 물려받고, 또 같은 file descriptor를 물려받는다
+(예를 들면 어떤 열려있는 파일을 둘다 fd 3로 가리키고, 
+오픈 파일 테이블도 똑같이 가리키므로 file pos를 공유
+또 ref 값도 1에서 2가 된다. )
+
+파일을 물려받기 때문에(stdout) 출력도 같은 모니터
+에서 일어난다. 
+
+자식이 종료되면 가상공간메모리, 파일 디스크립터 등을
+모두 회수한다. 그러나, process table entry에는 아예
+삭제하진 않고 남겨놓는다. 왜냐면, 나중에 부모가 자식이
+어떤 이유로 종료되었는지 알아야 할수도 있기 때문이다.
+그래서 이렇게 남아있는 종료된 자식을 zombie라고 하며\
+부모가 따로 reap 해줘야 한다. 
+만약 부모가 먼저 종료되면, kernel이 init 프로세스가
+남겨진 자식을 입양하게 한다. init process는 pid가 1이며
+절대 종료되지 않는다.(참고로 모든 프로세스의 parent)
+남겨진 자식이 좀비가 되면 init이 reap한다. 
+
+waitpid(pid, *statusp, options) -> 정상적이면
+종료된 자식의 PID, WNOHANG이면 0, 에러면 -1 리턴
+option=0(디폴트)이면 waitset에 있는 자식이 종료될
+때까지 call process의 execution을 suspend한다. 만약
+waitpid 함수가 호출된 시점에 waitset에 있는 자식이 
+모두 종료된 상태이면 returns immediately. 또 
+terminated child는 reaped. (좀비는 waitpid 하나당
+딱 한마리만 reap된다.)
+
+pid>0이면 wait set은 pid를 PID로 하는 자식 한마리만
+있는 sigleton set. 
+
+pid=-1이면 wait set consists of all parent's child processes.
+
+
+option
+WNOHANG: return immediately(return value=0)
+if none of the child processes in the wait set has ter
+minated yet. 디폴트는 계속 기다린다는(누구 하나 죽
+을때까지) 것에 유의.
+
+WUNTRACED: 디폴트에서, 종료된 자식 말고도 stopped
+child도 검사해서, 종료되거나 멈춘 자식이 있으면 
+그 자식의 PID를 리턴. 
+
+WCONTINUED: wait set에 있는 놈들이 종료되거나,
+혹은 stop이였다가 SIGCONT를 받고 다시 실행될때
+까지 기다린다. 
+
+WNOHANG | WUNTRACED: wait set에서 종료되거나
+멈춘 자식이 없으면 즉시 리턴(0). 있으면 그 놈 PID 리턴.
+
+statusp가 non_NULL이면, waitpid는 리턴을 일으킨
+자식의 status를 인코딩한다. (statusp가 가리키는 값을
+수정한다는거. ) 또 이 가리키는 값은 전처리매크로들
+을 통해 알아볼수 있는데, 다음과 같다. 
+
+WIFEXITED(status): returns true if the child terminated
+normally, via a call to exit func or a return. 
+
+이거 말고도 기타 등등 있다. csapp 교재 781쪽 참고.
+
+만약 waitpid 호출자가 자식이 없다면 returns -1, 
+sets errno to ECHILD. 만약 waitpid가 interruped by
+signal, then returns -1 and sets errno to EINTR.
+
+wait(*statusp)는 waitpid의 심플버전. waitpid(-1, *statusp,
+0)와 같다. 
+
+ 
