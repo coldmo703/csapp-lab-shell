@@ -165,6 +165,39 @@ int main(int argc, char **argv)
 */
 void eval(char *cmdline) 
 {
+    char *argv[MAXARGS];
+    char buf[MAXLINE];
+    int bg;
+    pid_t pid;
+    sigset_t mask, prev;
+    sigemptyset(&mask);
+    sigaddset(&mask, SIGCHLD);
+
+    strcpy(buf, cmdline);
+    bg=parseline(buf, argv);
+    if(argv[0]==NULL) return;
+
+    if(!builtin_cmd(argv)){ // built-in cmd가 아닌 경우. 
+        sigprocmask(SIG_BLOCK, &mask, &prev);
+        if((pid=fork())==0){ // 자식: 프로그램 실행
+            setpgid(0,0); // 그룹의 주인이 자기가 된다. 
+            if(bg){
+                addjob(jobs, getpid(), BG, argv);
+            }
+            else{
+                addjob(jobs, getpid(), FG, argv);
+            }
+            execve(argv[0], argv, environ);
+        }
+        
+        if(!bg){
+            int status;
+            waitfg(pid);//foreground이면 자식종료까지 기다리기.
+        }
+        else{ //background이면.. 구현중
+            
+        }
+    }
     return;
 }
 
@@ -231,6 +264,15 @@ int parseline(const char *cmdline, char **argv)
  */
 int builtin_cmd(char **argv) 
 {
+    if(!strcmp(argv[0], "quit")){
+        exit(0);
+    }
+    if(!strcmp(argv[0], "jobs")){
+        listjobs();
+    }
+    if(!strcmp(argv[0], "bg") || !strcmp(argv[0], "fg")){
+        do_bgfg(argv);
+    }
     return 0;     /* not a builtin command */
 }
 
@@ -238,7 +280,36 @@ int builtin_cmd(char **argv)
  * do_bgfg - Execute the builtin bg and fg commands
  */
 void do_bgfg(char **argv) 
-{
+{   
+    struct job_t job;
+    if(!strcmp(arv[0], "bg")){
+        if(argv[1][0]=="%"){
+            int jid=atoi(argv[1][1]);
+            job=getjobjid(jobs, jid);
+            job->state=BG;
+            kill(job->pid, SIGCONT);
+        }
+        else{
+            int pid=atoi(argv[1][0]);
+            job=getjobpid(pid);
+            job->state=BG;
+            kill(pid, SIGCONT);
+        }
+    }
+    else{
+        if(argv[1][0]=="%"){
+            int jid=atoi(argv[1][1]);
+            job=getjobjid(jobs, jid);
+            job->state=FG;
+            kill(job->pid, SIGCONT);
+        }
+        else{
+            int pid=atoi(argv[1][0]);
+            job=getjobpid(pid);
+            job->state=FG;
+            kill(pid, SIGCONT);
+        }
+    }
     return;
 }
 
@@ -263,6 +334,12 @@ void waitfg(pid_t pid)
  */
 void sigchld_handler(int sig) 
 {
+    int olderrno=errno;
+    
+    while(waitpid(-1, NULL, WNOHANG | WUNTRACED)>0){
+
+    }
+    errno=olderrno;
     return;
 }
 
@@ -273,6 +350,7 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
+
     return;
 }
 
