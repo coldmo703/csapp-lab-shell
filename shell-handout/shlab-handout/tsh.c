@@ -178,24 +178,26 @@ void eval(char *cmdline)
     if(argv[0]==NULL) return;
 
     if(!builtin_cmd(argv)){ // built-in cmd가 아닌 경우. 
-        sigprocmask(SIG_BLOCK, &mask, &prev);
+        sigprocmask(SIG_BLOCK, &mask, &prev);        //addjob이 안될 경우를 대비해 sigchld 블록
+        
         if((pid=fork())==0){ // 자식: 프로그램 실행
             setpgid(0,0); // 그룹의 주인이 자기가 된다. 
-            if(bg){
-                addjob(jobs, getpid(), BG, argv);
+            sigprocmask(SIG_SETMASK, &prev, NULL);
+            if(execve(argv[0], argv, environ) < 0){
+                printf("%s: Command not found\n", argv[0]);
+                fflush(stdout);
+                exit(0);
             }
-            else{
-                addjob(jobs, getpid(), FG, argv);
-            }
-            execve(argv[0], argv, environ);
         }
-        
+        addjob(jobs, pid, (bg ? BG : FG), cmdline);
+        int jid=pid2jid(pid);
+        sigprocmask(SIG_SETMASK, &prev, NULL);
         if(!bg){
-            int status;
             waitfg(pid);//foreground이면 자식종료까지 기다리기.
         }
         else{ //background이면.. 구현중
-            
+            printf("[%d] (%d) %s", jid, pid, cmdline);
+            fflush(stdout);
         }
     }
     return;
@@ -268,10 +270,16 @@ int builtin_cmd(char **argv)
         exit(0);
     }
     if(!strcmp(argv[0], "jobs")){
-        listjobs();
+        listjobs(jobs);
+        fflush(stdout);
+        return 1;
     }
     if(!strcmp(argv[0], "bg") || !strcmp(argv[0], "fg")){
         do_bgfg(argv);
+        return 1;
+    }
+    if(!strcmp(argv[0], "&")){
+        return 1;
     }
     return 0;     /* not a builtin command */
 }
@@ -281,35 +289,51 @@ int builtin_cmd(char **argv)
  */
 void do_bgfg(char **argv) 
 {   
-    struct job_t job;
-    if(!strcmp(arv[0], "bg")){
-        if(argv[1][0]=="%"){
-            int jid=atoi(argv[1][1]);
-            job=getjobjid(jobs, jid);
-            job->state=BG;
-            kill(job->pid, SIGCONT);
-        }
-        else{
-            int pid=atoi(argv[1][0]);
-            job=getjobpid(pid);
-            job->state=BG;
-            kill(pid, SIGCONT);
-        }
+    struct job_t *job = NULL;
+    int is_bg = !strcmp(argv[0], "bg");
+
+    // 1. 인자가 없는 경우 검사
+    if (argv[1] == NULL) {
+        printf("%s command requires PID or %%jobid argument\n", argv[0]);
+        return;
     }
-    else{
-        if(argv[1][0]=="%"){
-            int jid=atoi(argv[1][1]);
-            job=getjobjid(jobs, jid);
-            job->state=FG;
-            kill(job->pid, SIGCONT);
+
+    // 2. JID 인 경우 (% 시작)
+    if (argv[1][0] == '%') {
+        int jid = atoi(&argv[1][1]); // &argv[1][1] 또는 argv[1] + 1
+        job = getjobjid(jobs, jid);
+        if (job == NULL) {
+            printf("%s: No such job\n", argv[1]);
+            return;
         }
-        else{
-            int pid=atoi(argv[1][0]);
-            job=getjobpid(pid);
-            job->state=FG;
-            kill(pid, SIGCONT);
+    } 
+    // 3. PID 인 경우
+    else if (isdigit(argv[1][0])) {
+        pid_t pid = atoi(argv[1]); // argv[1] 주소 자체를 전달
+        job = getjobpid(jobs, pid);
+        if (job == NULL) {
+            printf("(%d): No such process\n", pid);
+            return;
         }
+    } 
+    // 4. 숫자가 아닌 이상한 인자가 들어온 경우
+    else {
+        printf("%s: argument must be a PID or %%jobid\n", argv[0]);
+        return;
     }
+
+    // 5. bg / fg 상태 변경 및 시그널 전송
+    if (is_bg) {
+        job->state = BG;
+        printf("[%d] (%d) %s", job->jid, job->pid, job->cmdline);
+        fflush(stdout);
+        kill(-(job->pid), SIGCONT); // 프로세스 그룹 전체에 재개 시그널 전송
+    } else {
+        job->state = FG;
+        kill(-(job->pid), SIGCONT);
+        waitfg(job->pid); // 포그라운드로 올렸으므로 끝날 때까지 대기
+    }
+
     return;
 }
 
@@ -318,6 +342,12 @@ void do_bgfg(char **argv)
  */
 void waitfg(pid_t pid)
 {
+    sigset_t mask;
+    sigemptyset(&mask);
+
+    while(fgpid(jobs)==pid){
+        sigsuspend(&mask);
+    }    
     return;
 }
 
@@ -335,9 +365,25 @@ void waitfg(pid_t pid)
 void sigchld_handler(int sig) 
 {
     int olderrno=errno;
-    
-    while(waitpid(-1, NULL, WNOHANG | WUNTRACED)>0){
-
+    int pid;
+    int status;
+    while((pid=waitpid(-1, &status, WNOHANG | WUNTRACED))>0){
+        if(WIFSIGNALED(status)){
+            printf("Job [%d] (%d) terminated by signal %d\n", 
+            pid2jid(pid), pid, WTERMSIG(status));
+            deletejob(jobs, pid);
+        }
+        else if(WIFSTOPPED(status)){
+            printf("Job [%d] (%d) stopped by signal %d\n", 
+            pid2jid(pid), pid, WSTOPSIG(status));
+            struct job_t* job=getjobpid(jobs, pid);
+            if(job!=NULL){
+                job->state=ST;
+            }
+        }
+        else if(WIFEXITED(status)){
+            deletejob(jobs, pid);
+        }
     }
     errno=olderrno;
     return;
@@ -350,7 +396,8 @@ void sigchld_handler(int sig)
  */
 void sigint_handler(int sig) 
 {
-
+    int fpid=fgpid(jobs);
+    kill((-1)*fpid, SIGINT); 
     return;
 }
 
@@ -361,6 +408,8 @@ void sigint_handler(int sig)
  */
 void sigtstp_handler(int sig) 
 {
+    int fpid=fgpid(jobs);
+    kill((-1)*fpid, SIGTSTP);
     return;
 }
 
